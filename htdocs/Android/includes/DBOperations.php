@@ -117,52 +117,206 @@
 
 
                 $selectors_array[] = $sel_array;
-
-                /*for($i = 0; $i < count($sel_array['itemLists']); $i++){
-                    for($j = 0; j<count($sel_array['itemLists'][$i]); i++){
-                        echo($sel_array['itemLists'][$i][$j])
-                    }
-                }*/
             }
         
-
-            $columns = "";
-            $from = "";
-            $whereConditions = "";
             /* $selectors_array = array(
                 0 => array(
                     "selectorType" => "select_team",
                     "itemsSelected" => array(array("a", "b"), array("b"), array("c"))
                 )
                 );*/
+            
+            $data = array();
+            $columns = "DISTINCT P.*, O.TeamName AS OpposingTeamName, I.Week AS Week";
+            $from = "PlayerPassingGameLogs P, GameLogsTeamData T, GameLogsTeamData O, GameLogsInfo I, PlayerSnapCountGameLogs S";
+            $whereConditions = "T.GameID = O.GameID 
+                                AND O.GameID = I.GameID 
+                                AND S.GameID = I.GameID
+                                AND I.GameID = P.GameID
+                                AND S.Name = P.Name";
+
+            $og_params = array();
+            $og_param_types = "";
+            $current_item_list = $selectors_array[0]["itemLists"][0];
 
             if($selectors_array[0]['selectorType'] == "SELECT_TEAM"){
-                $columns = "TeamName, Points, Games, Yards, TOs, PassYards, PassTDs, INTs, RushYards, RushTDs";
-                $from = "TeamStats";
-                $whereConditions = "";
+                $data["type"] = "Team";
+                $teams = $selectors_array[0]['itemLists'][0]; 
+                $teams = array_slice($teams, 1);
+                $whereConditions = $whereConditions . " AND (" . str_repeat(" (P.TeamName = ? AND T.TeamName = ? AND O.TeamName <> ?) OR ", count($teams) - 1) . " (P.TeamName = ? AND T.TeamName = ? AND O.TeamName <> ?)) ";
+                
+                $og_params = array();
 
-                $current_item_list = $selectors_array[0]['itemLists'][0];
-                $teamNames = array();
+                // IF TEAMS ARE (Cards, Jets), then params will be (Cards, Cards, Cards, Jets, Jets, Jets)
+                for($i = 0; $i< count($teams); $i++){
+                    $og_params[] = $teams[$i];
+                    $og_params[] = $teams[$i];
+                    $og_params[] = $teams[$i];
+                }
+            }
+
+            else if($selectors_array[0]['selectorType'] == "SELECT_POSITION"){
+
+                $data['type'] = "Position";
+                $positions = $selectors_array[0]['itemLists'][0]; 
+                $teams = $selectors_array[0]['itemLists'][1];
+
+                $positions = array_slice($positions, 1);
+                $teams = array_slice($teams, 1);
+
+                $whereConditions = $whereConditions . " AND (" . str_repeat(" S.Position = ?  OR ", count($positions) - 1) . " S.Position = ?)" 
+                            . " AND ("  . str_repeat(" (P.TeamName = ? AND T.TeamName = ? AND O.TeamName <> ?)  OR ", count($teams) - 1) . " (P.TeamName = ? AND T.TeamName = ? AND O.TeamName <> ?))" ;
+
+
+                $og_params = array();
+                for($i = 0; $i< count($positions); $i++){
+                    $og_params[] = $positions[$i];
+                }
+
+                for($i = 0; $i< count($teams); $i++){
+                    $og_params[] = $teams[$i];
+                    $og_params[] = $teams[$i];
+                    $og_params[] = $teams[$i];
+                }
+            }
+
+            else{
+                $data['type'] = "Player";
+                $names = $selectors_array[0]['itemLists'][2]; 
+                $names = array_slice($names, 1);
+                $whereConditions = $whereConditions . " AND (" . str_repeat(" P.Name = ? OR ", count($names) - 1) . " P.Name = ?) ";
+                $og_params = $names;  
+            }
+
+            $og_param_types = str_repeat("s", count($og_params));
+            $specifiers = "";
+            $spec_params = array();
+            $spec_param_types = "";
+
+            for($i = 1; $i < count($selectors_array); $i++){
+                $specifiers = $specifiers . " (";
+
+                if($selectors_array[$i]["selectorType"] == "AGAINST_TEAM"){
+                    $specifiers += "O.TeamName = ?";
+                    $spec_params[] = $selectors_array[$i]["itemLists"][0][0];
+                    $spec_param_types = $spec_param_types . "s";
+                }
+
+                else if($selectors_array[$i]["selectorType"] == "TEMPERATURE"){
+                    if($selectors_array[$i]["itemLists"][0] == "Less Than"){
+                        $specifiers += "I.Temperature < ?";
+                    }
+                    else{
+                        $specifiers += "I.Temperature >= ?";
+                    }
+
+                    $spec_params[] = $selectors_array[$i]["itemLists"][1][0];
+                    $spec_param_types = $spec_param_types . "s";
+                    
+                }
+
+                else if($selectors_array[i]["selectorType"] == "PLAYER_PLAYING"){
+                    $specifiers += "(S.Name = ? AND S.SnapPercentage > 0)";
+                }
+
+                else if($selectors_array[i]["selectorType"] == "PLAYER_ABSENT"){
+                    $specifiers += "S.Name <> ? OR (S.Name = ? AND S.SnapPercentage = 0)";
+                }
+
+                $specifiers = $specifiers . ") ";
+            }
+
+            $sql = "SELECT " . $columns . " FROM " . $from . " WHERE " . $whereConditions . $specifiers;
+
+            $stmt = $this -> con -> prepare($sql);
+
+            $params = array_merge($og_params, $spec_params);
+
+            $param_types = $og_param_types . $spec_param_types;
+
+           /* for($i = 0; $i<count($params); $i++){
+                echo " " . $params[$i];
+            }
+
+            echo "    " . $param_types;*/
+
+            $stmt -> bind_param($param_types, ...$params);
+
+            $stmt -> execute();
+
+            $result = $stmt->get_result();
+
+            $tuples = $result->fetch_all(MYSQLI_ASSOC);
+
+            $data = array_merge($data, array("playerPassingTuples" => $tuples)); 
+            
+            //GRAB RUSH RECIEVE
+
+            $columns = str_replace("P.*", "R.*", $columns);
+            $from = str_replace("PlayerPassingGameLogs P", "PlayerRushReceiveGameLogs R", $from);
+            $whereConditions = str_replace("P.", "R.", $whereConditions);
+
+            $sql = "SELECT " . $columns . " FROM " . $from . " WHERE " . $whereConditions . $specifiers;
+
+            $stmt = $this -> con -> prepare($sql);
+
+            $stmt -> bind_param($param_types, ...$params);
+
+            $stmt -> execute();
+
+            $result = $stmt->get_result();
+
+            $tuples = $result->fetch_all(MYSQLI_ASSOC);
+
+            $data = array_merge($data, array("playerRushReceiveTuples" => $tuples)); 
+
+
+            if($selectors_array[0]['selectorType'] == "SELECT_TEAM"){
+                
+
+                $columns = "DISTINCT I.GameID AS GameID, I.Week AS Week, I.Date AS Date, I.DayOfWeek AS DayOfWeek, I.OT AS OT,  T.TeamName AS OwnTeamName, T.FirstQuarter AS OwnFirstQuarter, 
+                                    T.SecondQuarter AS OwnSecondQuarter, T.ThirdQuarter AS OwnThirdQuarter, T.FourthQuarter as OwnFourthQuarter,
+                                    T.OTTotal AS OwnOTTotal, T.TotalScore AS OwnTotalScore, T.Coach AS OwnCoach, T.FirstDowns AS OwnFirstDowns,
+                                    T.Penalties AS OwnPenalties, T.PenaltyYards AS OwnPenaltyYards, T.ThirdDownAttempts AS OwnThirdDownAttempts,
+                                    T.ThirdDownConversions AS OwnThirdDownConversions, T.FourthDownAttempts AS OwnFourthDownAttempts,
+                                    T.FourthDownConversions AS OwnFourthDownConversions, T.ToP AS OwnToP, T.IsAWin AS OwnIsAWin,
+                                    O.TeamName AS OppTeamName, O.FirstQuarter AS OppFirstQuarter, 
+                                    O.SecondQuarter AS OppSecondQuarter, O.ThirdQuarter AS OppThirdQuarter, O.FourthQuarter as OppFourthQuarter,
+                                    O.OTTotal AS OppOTTotal, O.TotalScore AS OppTotalScore, O.Coach AS OppCoach, O.FirstDowns AS OppFirstDowns,
+                                    O.Penalties AS OppPenalties, O.PenaltyYards AS OppPenaltyYards, O.ThirdDownAttempts AS OppThirdDownAttempts,
+                                    O.ThirdDownConversions AS OppThirdDownConversions, O.FourthDownAttempts AS OppFourthDownAttempts,
+                                    O.FourthDownConversions AS OppFourthDownConversions, O.ToP AS OppToP, O.IsAWin AS OppIsAWin";
+
+                $from = "GameLogsTeamData T, GameLogsTeamData O, GameLogsInfo I, PlayerSnapCountGameLogs S";
+                $whereConditions = "T.GameID = O.GameID 
+                                    AND O.GameID = I.GameID 
+                                    AND S.GameID = I.GameID";
+
+                $current_item_list = $selectors_array[0]["itemLists"][0];
+                $params = array();
                 $param_types = "";
 
+                $teams = $selectors_array[0]['itemLists'][0]; 
+                $teams = array_slice($teams, 1); 
 
-                for($i = 0; $i < count($current_item_list); $i++){
-                    $whereConditions = $whereConditions . " TeamName = ? ";
-                    $teamNames[] = $current_item_list[$i];
-                    $param_types = $param_types . "s";
+                $whereConditions = $whereConditions . " AND (" . str_repeat("(T.TeamName = ? AND O.TeamName <> ?) OR ", count($teams) - 1) . " (T.TeamName = ? AND O.TeamName <> ?))";
+                $og_params = array();
 
-                    if($i != count($current_item_list) - 1){
-                        $whereConditions = $whereConditions . " OR ";
-                    } 
-
-
+                for($i = 0; $i<count($teams); $i++){
+                    $og_params[] = $teams[$i];
+                    $og_params[] = $teams[$i];
                 }
-                
-                $sql =  "SELECT " . $columns . " FROM " . $from . " WHERE " . $whereConditions;
+
+                $og_param_types = str_repeat("s", count($og_params));
+
+                $sql = "SELECT " . $columns . " FROM " . $from . " WHERE " . $whereConditions . $specifiers;
 
                 $stmt = $this -> con -> prepare($sql);
-    
-                $stmt -> bind_param($param_types, ...$teamNames);
+
+                $params = array_merge($og_params, $spec_params);
+                $param_types = $og_param_types . $spec_param_types;
+
+                $stmt -> bind_param($param_types, ...$params);
 
                 $stmt -> execute();
 
@@ -170,74 +324,8 @@
 
                 $tuples = $result->fetch_all(MYSQLI_ASSOC);
 
-                $data = array("type" => "Team", "teamTuples" => $tuples);
-                
+                $data = array_merge($data, array("teamTuples" => $tuples));
             }
-            
-            //TIME TO GET THE PASSING STATS
-            $columns = "Year, Team, Name, Age, Position, Games, GamesStarted, QBRecord, Completions, PassAttempts, PassingYards, PassingTDs, PassingInterceptions, LongestPass, PasserRating, QBR, Comebacks, GWD";
-            $from = "PlayerSeasonPassing";
-            $where = "";
-
-            if($selectors_array[0]['selectorType'] == "SELECT_TEAM"){
-                $teams = $selectors_array[0]['itemLists'][0]; 
-                $where = str_repeat(" Team = ?  OR ", count($teams) - 1) . " Team = ?";
-                $merged = $teams;
-                
-            }
-
-            else if($selectors_array[0]['selectorType'] == "SELECT_POSITION"){
-                $data['type'] = "Position";
-                $positions = $selectors_array[0]['itemLists'][0]; 
-                $teams = $selectors_array[0]['itemLists'][1];
-                $where = "(" . str_repeat(" Position = ?  OR ", count($positions) - 1) . " Position = ?)" 
-                            . " AND ("  . str_repeat(" Team = ?  OR ", count($teams) - 1) . " Team = ?)" ;
-
-                $merged = array_merge($positions, $teams);
-            
-            }
-            else{
-                $data['type'] = "Player";
-                $names = $selectors_array[0]['itemLists'][2]; 
-                $where = str_repeat(" Name = ? OR ", count($names) - 1) . " Name = ?";
-                $merged = $names;
-            }
-
-            $sql = "SELECT " . $columns . " FROM " . $from . " WHERE " . $where;
-
-            $stmt = $this -> con -> prepare($sql);
-
-            $param_types = str_repeat("s", count($merged));
-
-            $stmt -> bind_param($param_types, ...$merged);
-
-            $stmt -> execute();
-
-            $result = $stmt->get_result();
-
-            $tuples = $result->fetch_all(MYSQLI_ASSOC);
-
-            $data = array_merge($data, array("playerPassingTuples" => $tuples));  
-            
-            //NOW FETCH THE RUSH/RECEIVING STATS
-
-            $columns = "Year, Team, Name, Age, Position, Games, GamesStarted, RushAttempts, RushYards, RushTDs, RushLong, Targets, Receptions, ReceivingYards, ReceivingTDs, ReceivingLong, Fumbles";
-            $from = "PlayerSeasonRushReceive";
-
-            $sql = "SELECT " . $columns . " FROM " . $from . " WHERE " . $where;
-            $stmt = $this -> con -> prepare($sql);
-
-            $param_types = str_repeat("s", count($merged));
-
-            $stmt -> bind_param($param_types, ...$merged);
-
-            $stmt -> execute();
-
-            $result = $stmt->get_result();
-
-            $tuples = $result->fetch_all(MYSQLI_ASSOC);
-
-            $data = array_merge($data, array("playerRushReceiveTuples" => $tuples));  
 
             
             //$data = array("type" => "Team", "tuples" => array());
