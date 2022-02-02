@@ -84,6 +84,64 @@
             return $data;
         }
 
+        function getPlayersMultipleTeams($req){
+            $num_teams = $req['NumTeams'];
+            $teams = array();
+            for($i = 0; $i<$num_teams; $i++){
+                $teams[] = $req["Team" . $i];
+            }
+
+            $num_positions = $req['NumPositions'];
+            $positions = array();
+            for($i = 0; $i<$num_positions; $i++){
+                $positions[] = $req["Position" . $i];
+            }
+
+            $sql = "SELECT Name FROM PlayerSeasonPassing WHERE";
+            $where = "(";
+            $param_types = "";
+            $params = array();
+
+            for($i = 0; $i<$num_teams; $i++){
+                $param_types = $param_types . "ss";
+                $params[] = $teams[$i];
+
+                $where = $where . "Team = ? ";
+                if($i<$num_teams-1){
+                    $where = $where . "OR ";
+                }
+            }
+            $where = $where . ") AND (";
+
+            for($i = 0; $i<$num_positions; $i++){
+                $param_types = $param_types . "ss";
+                $params[] = $positions[$i];
+
+                $where = $where . "Position = ? ";
+                if($i<$num_positions-1){
+                    $where = $where . "OR ";
+                }
+            }
+            $where = $where . ")";
+            $params = array_merge($params, $params);
+
+            $sql = $sql . $where . " UNION SELECT Name FROM PlayerSeasonRushReceive WHERE " . $where;
+            $stmt = $this -> con -> prepare($sql);
+            $stmt -> bind_param($param_types, ...$params);
+
+            // echo $sql;
+            // echo $params;
+            // echo $param_types;
+
+            $stmt -> execute();
+
+            $result = $stmt->get_result();
+
+            $data = $result->fetch_all(MYSQLI_ASSOC);
+
+            return $data;
+        }
+
         function customQuery($req){
 
            /* $selectors_array = array(
@@ -127,6 +185,7 @@
                 );*/
             
             $data = array();
+            $needAnotherSC = false;
             $columns = "DISTINCT P.*, O.TeamName AS OpposingTeamName, I.Week AS Week";
             $from = "PlayerPassingGameLogs P, GameLogsTeamData T, GameLogsTeamData O, GameLogsInfo I, PlayerSnapCountGameLogs S";
             $whereConditions = "T.GameID = O.GameID 
@@ -194,20 +253,29 @@
             $spec_param_types = "";
 
             for($i = 1; $i < count($selectors_array); $i++){
-                $specifiers = $specifiers . " (";
+                $specifiers = $specifiers . " AND (";
 
                 if($selectors_array[$i]["selectorType"] == "AGAINST_TEAM"){
-                    $specifiers += "O.TeamName = ?";
-                    $spec_params[] = $selectors_array[$i]["itemLists"][0][0];
-                    $spec_param_types = $spec_param_types . "s";
+                    
+                    $other_teams = array_slice($selectors_array[$i]["itemLists"][0], 1);
+
+                    for($j = 0; $j < count($other_teams); $j++){
+                        $specifiers = $specifiers . "O.TeamName = ?";
+                        $spec_params[] = $other_teams[$j];
+                        $spec_param_types = $spec_param_types . "s";
+                        if($j < count($other_teams) - 1){
+                            $specifiers = $specifiers . " OR ";
+                        }
+                    }
+                    
                 }
 
                 else if($selectors_array[$i]["selectorType"] == "TEMPERATURE"){
                     if($selectors_array[$i]["itemLists"][0] == "Less Than"){
-                        $specifiers += "I.Temperature < ?";
+                        $specifiers = $specifiers . "I.Temperature < ?";
                     }
                     else{
-                        $specifiers += "I.Temperature >= ?";
+                        $specifiers = $specifiers . "I.Temperature >= ?";
                     }
 
                     $spec_params[] = $selectors_array[$i]["itemLists"][1][0];
@@ -215,18 +283,35 @@
                     
                 }
 
-                else if($selectors_array[i]["selectorType"] == "PLAYER_PLAYING"){
-                    $specifiers += "(S.Name = ? AND S.SnapPercentage > 0)";
+                else if($selectors_array[$i]["selectorType"] == "PLAYER_PLAYING"){
+                    $needAnotherSC = true;
+                    $from = $from . ", PlayerSnapCountGameLogs SB";
+
+                    $whereConditions = $whereConditions . " AND P.GameID = SB.GameID";
+
+                    $other_players = array_slice($selectors_array[$i]["itemLists"][1], 1);
+                    for($j = 0; $j < count($other_players); $j++){
+                        $specifiers = $specifiers . "(SB.Name = ? AND SB.SnapPercentage > 0)";
+                        $spec_params[] = $other_players[$j];
+                        $spec_param_types = $spec_param_types . "s";
+                        if($j < count($other_players) - 1){
+                            $specifiers = $specifiers . " OR ";
+                        }
+                    }
                 }
 
-                else if($selectors_array[i]["selectorType"] == "PLAYER_ABSENT"){
-                    $specifiers += "S.Name <> ? OR (S.Name = ? AND S.SnapPercentage = 0)";
+                else if($selectors_array[$i]["selectorType"] == "PLAYER_ABSENT"){
+                    $whereConditions = $whereConditions . "P.GameID = SB.GameID";
+                    $needAnotherSC = true;
+                    $specifiers = $specifiers . "S.Name <> ? OR (S.Name = ? AND S.SnapPercentage = 0)";
                 }
 
-                $specifiers = $specifiers . ") ";
+                $specifiers = $specifiers . ")";
             }
 
             $sql = "SELECT " . $columns . " FROM " . $from . " WHERE " . $whereConditions . $specifiers;
+
+            //echo $sql;
 
             $stmt = $this -> con -> prepare($sql);
 
@@ -234,11 +319,11 @@
 
             $param_types = $og_param_types . $spec_param_types;
 
-           /* for($i = 0; $i<count($params); $i++){
-                echo " " . $params[$i];
-            }
+            // for($i = 0; $i<count($params); $i++){
+            //     echo " " . $params[$i];
+            // }
 
-            echo "    " . $param_types;*/
+            // echo "    " . $param_types;
 
             $stmt -> bind_param($param_types, ...$params);
 
@@ -274,7 +359,7 @@
             if($selectors_array[0]['selectorType'] == "SELECT_TEAM"){
                 
 
-                $columns = "DISTINCT I.GameID AS GameID, I.Week AS Week, I.Date AS Date, I.DayOfWeek AS DayOfWeek, I.OT AS OT,  T.TeamName AS OwnTeamName, T.FirstQuarter AS OwnFirstQuarter, 
+                $columns = "DISTINCT I.GameID AS GameID, I.Week AS Week, I.Date AS Date, I.DayOfWeek AS DayOfWeek, I.OT AS OT, I.Temperature AS Temperature,  T.TeamName AS OwnTeamName, T.FirstQuarter AS OwnFirstQuarter, 
                                     T.SecondQuarter AS OwnSecondQuarter, T.ThirdQuarter AS OwnThirdQuarter, T.FourthQuarter as OwnFourthQuarter,
                                     T.OTTotal AS OwnOTTotal, T.TotalScore AS OwnTotalScore, T.Coach AS OwnCoach, T.FirstDowns AS OwnFirstDowns,
                                     T.Penalties AS OwnPenalties, T.PenaltyYards AS OwnPenaltyYards, T.ThirdDownAttempts AS OwnThirdDownAttempts,
@@ -286,11 +371,16 @@
                                     O.Penalties AS OppPenalties, O.PenaltyYards AS OppPenaltyYards, O.ThirdDownAttempts AS OppThirdDownAttempts,
                                     O.ThirdDownConversions AS OppThirdDownConversions, O.FourthDownAttempts AS OppFourthDownAttempts,
                                     O.FourthDownConversions AS OppFourthDownConversions, O.ToP AS OppToP, O.IsAWin AS OppIsAWin";
-
+                
                 $from = "GameLogsTeamData T, GameLogsTeamData O, GameLogsInfo I, PlayerSnapCountGameLogs S";
                 $whereConditions = "T.GameID = O.GameID 
                                     AND O.GameID = I.GameID 
                                     AND S.GameID = I.GameID";
+                if($needAnotherSC){
+                    $from = $from . ", PlayerSnapCountGameLogs SB";
+                    $whereConditions = $whereConditions . " AND I.GameID = SB.GameID";
+                }
+
 
                 $current_item_list = $selectors_array[0]["itemLists"][0];
                 $params = array();
